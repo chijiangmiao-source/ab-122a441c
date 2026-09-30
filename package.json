@@ -1,0 +1,17 @@
+{
+  "name": "attitude-guard-audit",
+  "version": "1.0.0",
+  "private": true,
+  "description": "姿态保护控制器：下发固件前的保护规则决策表完备性/互斥性符号审计（ROBDD，非枚举）",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "check": "node scripts/syntax-check.js",
+    "test": "node --test test/",
+    "fuzz": "node scripts/fuzz.mjs",
+    "verify": "node src/verify.js"
+  }
+}

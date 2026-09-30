@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>姿态保护控制器 · 决策表审计</title>
+<style>
+  :root { --bg:#0f141a; --panel:#171e27; --line:#2a3543; --fg:#e6edf3; --muted:#93a1b0;
+          --ok:#2ea043; --bad:#da3633; --warn:#d29922; --accent:#2f81f7; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.5 -apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; }
+  header { padding:16px 24px; border-bottom:1px solid var(--line); display:flex; align-items:baseline; gap:12px; flex-wrap:wrap; }
+  header h1 { font-size:18px; margin:0; }
+  header .sub { color:var(--muted); font-size:12px; }
+  main { padding:20px 24px; max-width:1200px; margin:0 auto; display:grid; gap:16px; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:16px; }
+  .panel h2 { margin:0 0 12px; font-size:15px; }
+  textarea, input { width:100%; background:#0d1117; color:var(--fg); border:1px solid var(--line);
+                    border-radius:6px; padding:8px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:13px; }
+  textarea { min-height:120px; resize:vertical; }
+  table { width:100%; border-collapse:collapse; }
+  th, td { border-bottom:1px solid var(--line); padding:6px 8px; text-align:left; vertical-align:top; }
+  th { color:var(--muted); font-weight:600; font-size:12px; }
+  .w-id { width:140px; } .w-act { width:160px; }
+  button { background:var(--accent); color:#fff; border:0; border-radius:6px; padding:8px 16px; cursor:pointer; font-size:13px; }
+  button.secondary { background:#30363d; }
+  button.danger { background:var(--bad); }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .muted { color:var(--muted); font-size:12px; }
+  .badge { display:inline-block; padding:2px 10px; border-radius:999px; font-size:12px; font-weight:600; }
+  .badge.ok { background:rgba(46,160,67,.18); color:#56d364; }
+  .badge.bad { background:rgba(218,54,51,.18); color:#ff7b72; }
+  .badge.warn { background:rgba(210,153,34,.18); color:#e3b341; }
+  .errs { border-left:3px solid var(--bad); padding:4px 0 4px 12px; margin:0; white-space:pre-wrap; }
+  .errs li { margin:2px 0; }
+  pre { background:#0d1117; border:1px solid var(--line); border-radius:6px; padding:10px; overflow:auto; font-size:12px; }
+  details summary { cursor:pointer; color:var(--accent); }
+  .kv { display:grid; grid-template-columns:max-content 1fr; gap:2px 16px; }
+  .frozen-banner { border-style:solid; }
+  .frozen-banner.pass { border-color:var(--ok); }
+  .frozen-banner.fail { border-color:var(--bad); }
+  code { background:#0d1117; padding:1px 5px; border-radius:4px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>姿态保护控制器 · 决策表审计</h1>
+  <span class="sub">规则下发固件前：符号裁决全赋值空间的空洞与重叠（ROBDD · 变量按标识 ASCII 序 · 非枚举）</span>
+  <span class="sub" id="health"></span>
+</header>
+<main>
+  <section class="panel">
+    <h2>1 · 稳定变量（至多 64 个，每行一个标识）</h2>
+    <textarea id="variables" placeholder="例如：&#10;safe&#10;armed&#10;gyro_ok"></textarea>
+  </section>
+
+  <section class="panel">
+    <h2>2 · 保护规则（至多 96 条；条件支持 ! &amp; | 与括号，&amp;&amp;/|| 亦可）</h2>
+    <table id="ruleTable">
+      <thead><tr><th class="w-id">唯一标识</th><th class="w-act">动作名</th><th>条件</th><th style="width:40px"></th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div class="row" style="margin-top:10px">
+      <button class="secondary" id="addRule" type="button">+ 添加规则</button>
+      <span class="muted">示例：</span>
+      <button class="secondary" data-example="partition" type="button">safe 与 !safe（应通过）</button>
+      <button class="secondary" data-example="hole" type="button">仅 armed（应有空洞）</button>
+      <button class="secondary" data-example="overlap" type="button">跨动作重叠</button>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="row">
+      <button id="auditBtn" type="button">提交并冻结审计结论</button>
+      <button class="secondary" id="reloadBtn" type="button">读取服务端状态</button>
+      <button class="danger" id="resetBtn" type="button">清空</button>
+      <span class="muted">提交后结论被冻结；此后任何草稿修改都会使旧证据失效。</span>
+    </div>
+  </section>
+
+  <section id="frozen"></section>
+</main>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const tbody = $('#ruleTable tbody');
+
+function ruleRow(rule = {}) {
+  const tr = document.createElement('tr');
+  tr.innerHTML = `<td><input data-k="id" placeholder="R1"></td>
+    <td><input data-k="action" placeholder="safe_hold"></td>
+    <td><input data-k="condition" placeholder="safe &amp; armed"></td>
+    <td><button class="danger" type="button" data-del>×</button></td>`;
+  tr.querySelector('[data-k=id]').value = rule.id || '';
+  tr.querySelector('[data-k=action]').value = rule.action || '';
+  tr.querySelector('[data-k=condition]').value = rule.condition || '';
+  tr.querySelector('[data-del]').onclick = () => { tr.remove(); markDirty(); };
+  tr.querySelectorAll('input').forEach((inp) => inp.addEventListener('input', markDirty));
+  tbody.appendChild(tr);
+}
+function collectDraft() {
+  return {
+    variables: $('#variables').value.split('\n').map((s) => s.trim()).filter(Boolean),
+    rules: [...tbody.querySelectorAll('tr')].map((tr) => ({
+      id: tr.querySelector('[data-k=id]').value,
+      action: tr.querySelector('[data-k=action]').value,
+      condition: tr.querySelector('[data-k=condition]').value,
+    })),
+  };
+}
+
+let saveTimer = null;
+async function putDraft() {
+  clearTimeout(saveTimer);
+  const r = await fetch('/api/drafts', { method:'PUT', headers:{'content-type':'application/json'},
+    body: JSON.stringify(collectDraft()) });
+  return r.json();
+}
+function scheduleSave() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(putDraft, 150);
+}
+function markDirty() {
+  scheduleSave();
+  $('#frozen').innerHTML = '<div class="panel muted">草稿已修改：旧审计证据已清除，请重新提交审计。</div>';
+}
+
+function fmtAssign(list) {
+  if (!list) return '—';
+  return list.map((a) => `${a.variable}=${a.value}`).join('，');
+}
+
+function renderFrozen(frozen) {
+  if (!frozen) {
+    $('#frozen').innerHTML = '<div class="panel muted">尚无冻结的审计结论。</div>';
+    return;
+  }
+  const { result, at } = frozen;
+  if (!result.ok) {
+    const items = result.errors.map((e) => `<li><code>${e.scope}</code>：${e.message}</li>`).join('');
+    $('#frozen').innerHTML = `<section class="panel frozen-banner fail">
+      <h2>❌ 输入校验未通过（审计未执行） · <span class="muted">冻结于 ${at}</span></h2>
+      <ul class="errs">${items}</ul></section>`;
+    return;
+  }
+  const a = result.audit;
+  const badge = a.passed ? '<span class="badge ok">通过 · 无空洞且无重叠</span>'
+                         : '<span class="badge bad">未通过</span>';
+  const hole = a.holes.exists
+    ? `<p>🕳️ <b>首个空洞赋值</b>（ASCII 字典序）：<code>${fmtAssign(a.holes.firstAssignment)}</code>
+       <span class="muted">（空洞赋值数 ${a.holes.satisfyingAssignments} / ${a.totalAssignments}）</span></p>`
+    : '<p>✅ 空洞：无（全赋值空间被规则覆盖）</p>';
+  let ov;
+  if (!a.overlaps.exists) ov = '<p>✅ 重叠：无（任意赋值至多命中一条规则）</p>';
+  else {
+    const hits = a.overlaps.hits.map((h) => `<li><code>${h.id}</code> → 动作 <code>${h.action}</code></li>`).join('');
+    ov = `<p>⚔️ <b>首个重叠赋值</b>（ASCII 字典序）：<code>${fmtAssign(a.overlaps.firstAssignment)}</code>
+          ${a.overlaps.oppositeActions ? '<span class="badge bad">不同动作同时触发</span>' : '<span class="badge warn">同动作多命中</span>'}</p>
+          <p>命中规则（按标识排序）：</p><ul class="errs" style="border-color:var(--warn)">${hits}</ul>`;
+  }
+  const ruleCards = a.rules.map((r) => `<details>
+      <summary><code>${r.id}</code>（动作 <code>${r.action}</code>）— 可达节点 ${r.nodeSummary.reachableNodes}，满足赋值 ${r.nodeSummary.satisfyingAssignments}</summary>
+      <p class="muted">条件：<code>${r.condition}</code></p>
+      <pre>${r.nodeSummary.canonical}</pre>
+    </details>`).join('');
+  $('#frozen').innerHTML = `<section class="panel frozen-banner ${a.passed ? 'pass' : 'fail'}">
+    <h2>${badge} · <span class="muted">冻结于 ${at}</span></h2>
+    <div class="kv">
+      <span class="muted">裁决方法</span><span>${a.method}</span>
+      <span class="muted">变量顺序</span><span>${a.variableOrder.join('，') || '（无）'}</span>
+      <span class="muted">全赋值空间</span><span>${a.totalAssignments} 个赋值（${a.variableCount} 个变量，${a.ruleCount} 条规则）</span>
+    </div>
+    ${hole}${ov}
+    <p><b>覆盖结论：</b>${a.conclusion}</p>
+    <h2>各规则规范节点摘要</h2>${ruleCards}
+  </section>`;
+}
+
+$('#addRule').onclick = () => { ruleRow(); markDirty(); };
+$('#variables').addEventListener('input', () => { markDirty(); });
+$('#resetBtn').onclick = async () => {
+  await fetch('/api/reset', { method:'POST' });
+  $('#variables').value = ''; tbody.innerHTML = '';
+  renderFrozen(null);
+};
+$('#auditBtn').onclick = async () => {
+  await putDraft();
+  const r = await fetch('/api/audit', { method:'POST' });
+  renderFrozen(await r.json());
+};
+$('#reloadBtn').onclick = async () => {
+  const s = await (await fetch('/api/state')).json();
+  $('#variables').value = s.draft.variables.join('\n');
+  tbody.innerHTML = '';
+  s.draft.rules.forEach(ruleRow);
+  renderFrozen(s.frozen);
+};
+
+const EXAMPLES = {
+  partition: { variables: ['safe'], rules: [
+    { id:'R1', action:'allow', condition:'safe' },
+    { id:'R2', action:'lockout', condition:'!safe' } ] },
+  hole: { variables: ['armed'], rules: [
+    { id:'R1', action:'fire', condition:'armed' } ] },
+  overlap: { variables: ['safe','armed'], rules: [
+    { id:'R1', action:'hold', condition:'safe | armed' },
+    { id:'R2', action:'lockout', condition:'!safe' } ] },
+};
+document.querySelectorAll('[data-example]').forEach((b) => b.onclick = async () => {
+  const ex = EXAMPLES[b.dataset.example];
+  $('#variables').value = ex.variables.join('\n');
+  tbody.innerHTML = ''; ex.rules.forEach(ruleRow);
+  await markDirty();
+});
+
+(async () => {
+  try {
+    const h = await (await fetch('/healthz')).json();
+    $('#health').textContent = `健康检查：${h.status}`;
+    const s = await (await fetch('/api/state')).json();
+    $('#variables').value = s.draft.variables.join('\n');
+    tbody.innerHTML = ''; s.draft.rules.forEach(ruleRow);
+    renderFrozen(s.frozen);
+  } catch (e) { $('#health').textContent = '健康检查失败'; }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,6 @@
+node_modules/
+.git/
+*.log
+.env
+.npm-cache/
+.DS_Store
